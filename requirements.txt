@@ -1,0 +1,7 @@
+# Banking Agentic AI Framework — Python 3.11 (trimmed: only what is imported)
+fastapi==0.111.0
+uvicorn[standard]==0.30.0
+pydantic==2.7.0
+pyyaml==6.0.1
+anthropic==0.30.0
+redis[asyncio]==5.0.4

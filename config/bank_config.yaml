@@ -1,0 +1,289 @@
+# ═══════════════════════════════════════════════════════════════════
+# Banking Agentic AI Framework — Bank Configuration (v2.1)
+#
+# Post-audit changes:
+#   • segments keys now match core.agent_base.SEGMENT_ALIASES output
+#   • each profile carries its OWN nba_segment_map so NBA never recommends
+#     products the bank doesn't sell (india_nbfc was getting US products)
+#   • credit hard-decline gates added (max_pd, max_delinquencies)
+#   • BANK_PROFILE env var overrides ACTIVE_PROFILE at deploy time
+# ═══════════════════════════════════════════════════════════════════
+
+ACTIVE_PROFILE: mid_scale_bank
+
+profiles:
+
+  # ─────────────────────────────────────────────────────────────────
+  mid_scale_bank:
+    name: "MidBank National"
+    type: "Commercial Bank"
+    tier: "Mid-Scale"
+    currency: "USD"
+    currency_symbol: "$"
+    regulatory_regime: "US Federal Reserve / OCC"
+    base_credit_score_model: "FICO"
+    score_range: [300, 850]
+
+    # ── Time reference ─────────────────────────────────────────────
+    # null → derive from the latest activity date in the data; set e.g. "2025-12-31" to pin.
+    as_of_date: null
+
+    # ── Currency-dependent model parameters (all amounts in this profile's currency) ──
+    quality_gate:
+      closed_account_min_balance: 1000        # closed accounts above this are excluded
+      cc_implausible_above: 100000            # credit-card balance above this is capped …
+      cc_cap: 50000                           # … to this
+    clv:
+      deposit_yield: 0.018                    # bank NIM on deposits
+      liability_yield: 0.032                  # bank yield on lending balances
+      product_fee: 95                         # annual fee/servicing income per product
+      investable_multiple: { mass_retail: 0.8, mass_affluent: 2.0, small_business: 2.5, high_net_worth: 6.0, ultra_hnw: 15.0 }
+    nba:
+      min_income_for: { investment_advisory: 40000, money_market: 30000, mortgage: 35000 }
+      min_assets_for: { investment_advisory: 10000, money_market: 5000, cd: 2500 }
+    fraud:
+      thin_baseline_high_value: 10000         # with <3 debits of history, amounts above this add risk
+      max_alert_age_days: 365                 # alerts older than this (from as_of) are discounted
+
+    agents:
+      churn:        { enabled: true,  priority: 1, realtime: true  }
+      fraud:        { enabled: true,  priority: 1, realtime: true  }
+      nba:          { enabled: true,  priority: 2, realtime: false }
+      credit_risk:  { enabled: true,  priority: 1, realtime: false }
+      sentiment:    { enabled: true,  priority: 3, realtime: false }
+      clv:          { enabled: true,  priority: 2, realtime: false }
+
+    thresholds:
+      churn_high_risk: 0.60
+      churn_medium_risk: 0.35
+      fraud_block_score: 75
+      fraud_flag_score: 45
+      credit_max_dti: 0.50
+      credit_max_utilization: 0.80
+      credit_hard_decline_pd: 0.20          # PD above this → max_loan = 0, appetite = Decline
+      credit_hard_decline_delinquencies: 3  # ≥ this many delinquent accounts → Decline
+      clv_premium_floor: 200000
+      sentiment_escalation_score: 0.30
+      min_txns_for_bgnbd: 6                 # below this, CLV uses balance-based model
+
+    # Income multiple caps by internal grade (max_loan = income × cap)
+    loan_income_multiple_by_grade:
+      AAA: 5.0
+      AA: 4.5
+      A: 4.0
+      BBB: 3.0
+      BB: 2.0
+      B: 1.0
+      CCC: 0.0
+
+    products:
+      - savings_account
+      - checking_account
+      - money_market
+      - cd
+      - mortgage
+      - auto_loan
+      - personal_loan
+      - business_loan
+      - credit_card_standard
+      - credit_card_rewards
+      - term_insurance
+      - investment_advisory
+
+    # Peer-segment collaborative-filter priors. ONLY products in `products` above are valid.
+    nba_segment_map:
+      mass_retail:    [savings_account, checking_account, credit_card_standard, personal_loan, term_insurance]
+      mass_affluent:  [money_market, credit_card_rewards, investment_advisory, mortgage, term_insurance, cd]
+      small_business: [business_loan, checking_account, credit_card_rewards, investment_advisory, term_insurance]
+      high_net_worth: [investment_advisory, credit_card_rewards, mortgage, term_insurance, money_market, cd]
+      ultra_hnw:      [investment_advisory, credit_card_rewards, mortgage, business_loan, term_insurance]
+
+    # Annual revenue the bank typically earns per product, used for NBA expected_revenue
+    product_revenue_annual:
+      savings_account: 90
+      checking_account: 120
+      money_market: 260
+      cd: 180
+      mortgage: 2400
+      auto_loan: 900
+      personal_loan: 750
+      business_loan: 3200
+      credit_card_standard: 210
+      credit_card_rewards: 480
+      term_insurance: 320
+      investment_advisory: 1800
+
+    segments:
+      mass_retail:     { clv_multiplier: 1.0, nba_depth: 3 }
+      mass_affluent:   { clv_multiplier: 1.8, nba_depth: 4 }
+      small_business:  { clv_multiplier: 2.1, nba_depth: 5 }
+      high_net_worth:  { clv_multiplier: 3.2, nba_depth: 5 }
+      ultra_hnw:       { clv_multiplier: 5.0, nba_depth: 5 }
+
+  # ─────────────────────────────────────────────────────────────────
+  community_bank:
+    name: "Tri-County Community Bank"
+    type: "Community Bank"
+    tier: "Small"
+    currency: "USD"
+    currency_symbol: "$"
+    regulatory_regime: "FDIC / State"
+    base_credit_score_model: "FICO"
+    score_range: [300, 850]
+    # ── Time reference ─────────────────────────────────────────────
+    # null → derive from the latest activity date in the data; set e.g. "2025-12-31" to pin.
+    as_of_date: null
+
+    # ── Currency-dependent model parameters (all amounts in this profile's currency) ──
+    quality_gate:
+      closed_account_min_balance: 1000        # closed accounts above this are excluded
+      cc_implausible_above: 100000            # credit-card balance above this is capped …
+      cc_cap: 50000                           # … to this
+    clv:
+      deposit_yield: 0.018                    # bank NIM on deposits
+      liability_yield: 0.032                  # bank yield on lending balances
+      product_fee: 70                         # annual fee/servicing income per product
+      investable_multiple: { mass_retail: 0.8, mass_affluent: 2.0, small_business: 2.5, high_net_worth: 6.0, ultra_hnw: 15.0 }
+    nba:
+      min_income_for: { investment_advisory: 40000, money_market: 30000, mortgage: 35000 }
+      min_assets_for: { investment_advisory: 10000, money_market: 5000, cd: 2500 }
+    fraud:
+      thin_baseline_high_value: 10000         # with <3 debits of history, amounts above this add risk
+      max_alert_age_days: 365                 # alerts older than this (from as_of) are discounted
+
+    agents:
+      churn:        { enabled: true,  priority: 1, realtime: true  }
+      fraud:        { enabled: true,  priority: 1, realtime: true  }
+      nba:          { enabled: true,  priority: 2, realtime: false }
+      credit_risk:  { enabled: true,  priority: 1, realtime: false }
+      sentiment:    { enabled: false, priority: 3, realtime: false }
+      clv:          { enabled: false, priority: 2, realtime: false }
+    thresholds:
+      churn_high_risk: 0.55
+      churn_medium_risk: 0.30
+      fraud_block_score: 80
+      fraud_flag_score: 55
+      credit_max_dti: 0.43
+      credit_max_utilization: 0.75
+      credit_hard_decline_pd: 0.15
+      credit_hard_decline_delinquencies: 2
+      clv_premium_floor: 80000
+      sentiment_escalation_score: 0.30
+      min_txns_for_bgnbd: 6
+    loan_income_multiple_by_grade: { AAA: 4.0, AA: 3.5, A: 3.0, BBB: 2.5, BB: 1.5, B: 0.5, CCC: 0.0 }
+    products:
+      - savings_account
+      - checking_account
+      - mortgage
+      - auto_loan
+      - personal_loan
+      - credit_card_standard
+    nba_segment_map:
+      mass_retail:    [savings_account, checking_account, credit_card_standard, personal_loan]
+      mass_affluent:  [mortgage, savings_account, credit_card_standard, auto_loan]
+      small_business: [checking_account, personal_loan, credit_card_standard]
+      high_net_worth: [mortgage, savings_account, auto_loan]
+      ultra_hnw:      [mortgage, savings_account]
+    product_revenue_annual:
+      savings_account: 70
+      checking_account: 95
+      mortgage: 2100
+      auto_loan: 800
+      personal_loan: 650
+      credit_card_standard: 180
+    segments:
+      mass_retail:     { clv_multiplier: 1.0, nba_depth: 3 }
+      mass_affluent:   { clv_multiplier: 1.5, nba_depth: 3 }
+      small_business:  { clv_multiplier: 1.8, nba_depth: 3 }
+      high_net_worth:  { clv_multiplier: 2.5, nba_depth: 3 }
+      ultra_hnw:       { clv_multiplier: 3.0, nba_depth: 3 }
+
+  # ─────────────────────────────────────────────────────────────────
+  india_nbfc:
+    name: "Bharati Finance NBFC"
+    type: "NBFC"
+    tier: "Mid-Scale"
+    currency: "INR"
+    currency_symbol: "₹"
+    regulatory_regime: "RBI / IRDAI"
+    base_credit_score_model: "CIBIL"
+    score_range: [300, 900]
+    # ── Time reference ─────────────────────────────────────────────
+    # null → derive from the latest activity date in the data; set e.g. "2025-12-31" to pin.
+    as_of_date: null
+
+    # ── Currency-dependent model parameters (all amounts in this profile's currency) ──
+    quality_gate:
+      closed_account_min_balance: 50000       # closed accounts above this are excluded
+      cc_implausible_above: 5000000            # credit-card balance above this is capped …
+      cc_cap: 1000000                         # … to this
+    clv:
+      deposit_yield: 0.018                    # bank NIM on deposits
+      liability_yield: 0.032                  # bank yield on lending balances
+      product_fee: 4500                       # annual fee/servicing income per product
+      investable_multiple: { mass_retail: 0.8, mass_affluent: 2.0, small_business: 2.5, high_net_worth: 6.0, ultra_hnw: 15.0 }
+    nba:
+      min_income_for: { mutual_fund_sip: 240000, home_loan: 300000, msme_loan: 500000 }
+      min_assets_for: { mutual_fund_sip: 50000, savings_account: 0 }
+    fraud:
+      thin_baseline_high_value: 500000        # with <3 debits of history, amounts above this add risk
+      max_alert_age_days: 365                 # alerts older than this (from as_of) are discounted
+
+    agents:
+      churn:        { enabled: true,  priority: 1, realtime: true  }
+      fraud:        { enabled: true,  priority: 1, realtime: true  }
+      nba:          { enabled: true,  priority: 1, realtime: false }
+      credit_risk:  { enabled: true,  priority: 1, realtime: false }
+      sentiment:    { enabled: true,  priority: 2, realtime: false }
+      clv:          { enabled: true,  priority: 2, realtime: false }
+    thresholds:
+      churn_high_risk: 0.65
+      churn_medium_risk: 0.40
+      fraud_block_score: 70
+      fraud_flag_score: 40
+      credit_max_dti: 0.55
+      credit_max_utilization: 0.85
+      credit_hard_decline_pd: 0.25
+      credit_hard_decline_delinquencies: 3
+      clv_premium_floor: 1500000
+      sentiment_escalation_score: 0.30
+      min_txns_for_bgnbd: 6
+    loan_income_multiple_by_grade: { AAA: 6.0, AA: 5.0, A: 4.5, BBB: 3.5, BB: 2.5, B: 1.0, CCC: 0.0 }
+    products:
+      - savings_account
+      - home_loan
+      - gold_loan
+      - msme_loan
+      - personal_loan
+      - mutual_fund_sip
+      - insurance
+    nba_segment_map:
+      mass_retail:    [savings_account, gold_loan, personal_loan, insurance]
+      mass_affluent:  [mutual_fund_sip, home_loan, insurance, personal_loan]
+      small_business: [msme_loan, gold_loan, savings_account, insurance]
+      high_net_worth: [mutual_fund_sip, home_loan, insurance]
+      ultra_hnw:      [mutual_fund_sip, home_loan, msme_loan]
+    product_revenue_annual:
+      savings_account: 1200
+      home_loan: 38000
+      gold_loan: 9500
+      msme_loan: 42000
+      personal_loan: 11000
+      mutual_fund_sip: 6500
+      insurance: 4800
+    segments:
+      mass_retail:     { clv_multiplier: 1.0, nba_depth: 3 }
+      mass_affluent:   { clv_multiplier: 1.8, nba_depth: 4 }
+      small_business:  { clv_multiplier: 2.1, nba_depth: 4 }
+      high_net_worth:  { clv_multiplier: 3.2, nba_depth: 4 }
+      ultra_hnw:       { clv_multiplier: 5.0, nba_depth: 4 }
+
+# ─── Global ─────────────────────────────────────────────────────────
+global:
+  llm_model: "claude-sonnet-4-6"
+  agent_timeout_seconds: 30
+  max_parallel_agents: 4
+  cache_ttl_seconds: 300
+  log_level: "INFO"
+  enable_agent_tracing: true
+  enable_cross_agent_calls: true

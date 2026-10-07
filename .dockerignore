@@ -1,0 +1,7 @@
+client/react-app/node_modules
+client/react-app/build
+**/__pycache__
+.pytest_cache
+.git
+.env
+*.log

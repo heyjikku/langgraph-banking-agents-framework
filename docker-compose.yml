@@ -1,0 +1,89 @@
+version: "3.9"
+
+# ═══════════════════════════════════════════════════════════════════
+# Banking Agentic AI Framework — Docker Compose
+# Lean: 1 app container + optional Redis + optional Nginx
+# Deploy: docker-compose up --build     (< 90 seconds cold start)
+# ═══════════════════════════════════════════════════════════════════
+
+networks:
+  agents-net:
+    driver: bridge
+
+volumes:
+  redis_data:
+
+services:
+
+  # ─── Core App (All agents in one process — fastest cold start) ──────
+  banking-agents:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    container_name: banking-agents
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - API_KEYS=${API_KEYS:-}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+      - RATE_LIMIT_RPM=${RATE_LIMIT_RPM:-120}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - BANK_PROFILE=${BANK_PROFILE:-mid_scale_bank}
+      - WORKERS=${WORKERS:-2}
+      - DEV_MODE=${DEV_MODE:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATA_DIR=/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - agents-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 8s
+      retries: 3
+      start_period: 15s
+    volumes:
+      - ./config:/app/config:ro    # Live config reload without rebuild
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  # ─── Redis (Agent memory + result cache) ────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: banking-agents-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - agents-net
+    restart: unless-stopped
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ─── Nginx (Optional — reverse proxy + API routing) ─────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: banking-agents-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - banking-agents
+    networks:
+      - agents-net
+    restart: unless-stopped
+    profiles:
+      - with-nginx      # Enable: docker-compose --profile with-nginx up
