@@ -20,7 +20,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-    container_name: banking-agents
+    container_name: langgraph-banking-agents
     ports:
       - "8000:8000"
     environment:
@@ -57,7 +57,7 @@ services:
   # ─── Redis (Agent memory + result cache) ────────────────────────────
   redis:
     image: redis:7.2-alpine
-    container_name: banking-agents-redis
+    container_name: langgraph-banking-agents-redis
     ports:
       - "6379:6379"
     volumes:
@@ -75,7 +75,7 @@ services:
   # ─── Nginx (Optional — reverse proxy + API routing) ─────────────────
   nginx:
     image: nginx:1.25-alpine
-    container_name: banking-agents-nginx
+    container_name: langgraph-banking-agents-nginx
     ports:
       - "80:80"
     volumes:
