@@ -6,7 +6,7 @@ Quality-gated, deterministic, config-driven multi-agent Customer 360 for mid-sca
 ## What changed in v2.1 (post-audit)
 An adversarial review of every file and the input dataset found **34 weaknesses** — all fixed.
 Full findings, fixes and before/after numbers: [`docs/AUDIT_REPORT.md`](docs/AUDIT_REPORT.md) — two audits, 48 findings.
-Regression suite: `pip install -r requirements-dev.txt && pytest tests/ -q` (43 tests).
+Regression suite: `pip install -r requirements-dev.txt && pytest tests/ -q`.
 
 Headline changes:
 - **Data Quality Gate** (`core/data_quality.py`) runs before any agent — repairs, excludes and flags contradictory records; every response carries a `data_quality` report with a `trust_score`.
@@ -15,6 +15,7 @@ Headline changes:
 - **Credit** has hard decline gates and grade-based exposure caps from bank config; consumes Fraud output.
 - **CLV** uses a relationship-value model when transaction history is thin; blends known LTV.
 - **NBA** consumes Churn + CLV output, uses per-profile product maps and a revenue table.
+- **LangGraph orchestration** — the six existing agents are graph nodes; independent scoring runs concurrently, followed by Credit Risk and NBA dependencies. The existing result cache remains separate; durable graph checkpoints are not enabled.
 - **Security** — API-key auth on every `/api/*` route, token-bucket rate limiting, explicit CORS.
 - **Deploy** — `BANK_PROFILE` env var actually switches profiles; Redis-backed chat memory for multi-worker.
 

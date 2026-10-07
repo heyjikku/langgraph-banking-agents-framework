@@ -22,8 +22,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from core.agent_base import BaseAgent, AgentContext, AgentResult, AgentTool, ACTIVE_PROFILE, SKIP_LLM, resolve_as_of
-from core.data_quality import gate
+from core.agent_base import BaseAgent, AgentContext, AgentResult, AgentTool, ACTIVE_PROFILE, SKIP_LLM
 from core.deterministic import data_fingerprint
 from core.memory import memory
 
@@ -33,6 +32,7 @@ from agents.nba.agent import NextBestActionAgent
 from agents.credit_risk.agent import CreditRiskAgent
 from agents.clv.agent import CLVAgent
 from agents.sentiment.agent import SentimentAgent
+from agents.orchestrator.graph import build_pipeline_graph
 
 logger = logging.getLogger("orchestrator")
 
@@ -60,6 +60,10 @@ class OrchestratorAgent(BaseAgent):
     def build_tools(self) -> List[AgentTool]:
         return []
 
+    def __init__(self):
+        super().__init__()
+        self._pipeline_graph = build_pipeline_graph(self, AGENT_REGISTRY, PHASE1)
+
     async def execute(self, ctx: AgentContext) -> Dict[str, Any]:
         return {}
 
@@ -72,7 +76,6 @@ class OrchestratorAgent(BaseAgent):
         run_id = f"run-{uuid.uuid4().hex[:12]}"
         t0 = time.perf_counter()
         started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        token = SKIP_LLM.set(not narratives)
         fp = data_fingerprint(customer_data)
         cache_key = f"pipeline:{customer_id}:{task}:{fp}:{','.join(requested_agents or [])}:{'n' if narratives else 'b'}:{as_of or ''}"
 
@@ -82,49 +85,48 @@ class OrchestratorAgent(BaseAgent):
                 cached["cache_hit"] = True
                 return cached
 
-        # 1. Quality gate — agents never see raw data
-        cleaned, qreport = gate.clean(customer_data)
-        as_of_date = resolve_as_of(cleaned, self.bank_config, as_of)
-        meta: Dict[str, Any] = {"as_of": as_of_date}
-        if inflight_transaction: meta["inflight_transaction"] = inflight_transaction
-        ctx = AgentContext(run_id=run_id, customer_id=customer_id, customer_data=cleaned, metadata=meta)
-
-        # 2. Plan
-        plan = await self._plan(task, requested_agents, cleaned)
-
-        # 3. Phase 1 (parallel, bounded)
-        results: Dict[str, AgentResult] = await self._dispatch_parallel(plan["parallel"], ctx)
-
-        # 4. Phase 2 (sequential, sees phase-1 outputs)
-        for key in plan["sequential"]:
-            ctx.results_so_far = {k: v.output for k, v in results.items() if v.success}
-            r = await self._dispatch_single(key, ctx)
-            if r: results[key] = r
-
-        # 5. Synthesis
+        token = SKIP_LLM.set(not narratives)
         try:
-            synthesis = await self._synthesise(cleaned, results, run_id)
+            state = await self._pipeline_graph.ainvoke({
+                "run_id": run_id,
+                "customer_id": customer_id,
+                "task": task,
+                "customer_data": customer_data,
+                "requested_agents": requested_agents,
+                "inflight_transaction": inflight_transaction,
+                "as_of_override": as_of,
+                "agent_semaphore": asyncio.Semaphore(int(self.global_config.get("max_parallel_agents", 4))),
+                "results": {},
+            })
+            plan = state["plan"]
+            as_of_date = state["as_of_date"]
+            cleaned = state["cleaned_data"]
+            qreport = state["quality_report"]
+            unordered_results = state["results"]
+            ordered_keys = [key for key in plan["parallel"] + plan["sequential"] if key in unordered_results]
+            results = {key: unordered_results[key] for key in ordered_keys}
+            synthesis = state["synthesis"]
+
+            out = {
+                "run_id": run_id, "started_at": started_at, "as_of_date": as_of_date.isoformat(), "customer_id": customer_id, "task": task, "bank_profile": ACTIVE_PROFILE,
+                "bank_name": self.bank_config.get("name"), "plan": plan,
+                "total_latency_ms": round((time.perf_counter() - t0) * 1000, 1),
+                "agents_executed": list(results), "agents_succeeded": [k for k, v in results.items() if v.success],
+                "agents_failed": {k: v.error for k, v in results.items() if not v.success},
+                "agent_latencies_ms": {k: v.latency_ms for k, v in results.items()},
+                "agent_confidence": {k: v.confidence for k, v in results.items() if v.success},
+                "results": {k: v.output for k, v in results.items() if v.success},
+                "synthesis": synthesis,
+                "data_quality": qreport.to_dict(),
+                "cache_hit": False, "data_fingerprint": fp,
+            }
+            if not inflight_transaction:
+                await memory.set(cache_key, out, ttl=int(self.global_config.get("cache_ttl_seconds", 300)))
+                for k, v in results.items():
+                    if v.success: await memory.save_agent_result(customer_id, k, v.output)
+            return out
         finally:
             SKIP_LLM.reset(token)
-
-        out = {
-            "run_id": run_id, "started_at": started_at, "as_of_date": as_of_date.isoformat(), "customer_id": customer_id, "task": task, "bank_profile": ACTIVE_PROFILE,
-            "bank_name": self.bank_config.get("name"), "plan": plan,
-            "total_latency_ms": round((time.perf_counter() - t0) * 1000, 1),
-            "agents_executed": list(results), "agents_succeeded": [k for k, v in results.items() if v.success],
-            "agents_failed": {k: v.error for k, v in results.items() if not v.success},
-            "agent_latencies_ms": {k: v.latency_ms for k, v in results.items()},
-            "agent_confidence": {k: v.confidence for k, v in results.items() if v.success},
-            "results": {k: v.output for k, v in results.items() if v.success},
-            "synthesis": synthesis,
-            "data_quality": qreport.to_dict(),
-            "cache_hit": False, "data_fingerprint": fp,
-        }
-        if not inflight_transaction:
-            await memory.set(cache_key, out, ttl=int(self.global_config.get("cache_ttl_seconds", 300)))
-            for k, v in results.items():
-                if v.success: await memory.save_agent_result(customer_id, k, v.output)
-        return out
 
     # ── Planning ───────────────────────────────────────────────────────────
 
@@ -181,28 +183,6 @@ class OrchestratorAgent(BaseAgent):
         if p.get("is_active", True): par.append("clv"); seq.append("nba")
         if cleaned.get("computed", {}).get("total_liabilities", 0) > 0 or p.get("credit_score"): seq.append("credit_risk")
         return {"parallel": par, "sequential": seq, "why": "signal-driven heuristic"}, "heuristic"
-
-    # ── Dispatch ───────────────────────────────────────────────────────────
-
-    async def _dispatch_parallel(self, keys: List[str], ctx: AgentContext) -> Dict[str, AgentResult]:
-        if not keys: return {}
-        sem = asyncio.Semaphore(int(self.global_config.get("max_parallel_agents", 4)))
-        timeout = float(self.global_config.get("agent_timeout_seconds", 30))
-
-        async def one(k: str):
-            async with sem:
-                try:
-                    return k, await asyncio.wait_for(AGENT_REGISTRY[k]().run(ctx), timeout)
-                except asyncio.TimeoutError:
-                    return k, AgentResult(k, k, ctx.customer_id, False, {}, error=f"timeout>{timeout}s")
-        return dict(await asyncio.gather(*(one(k) for k in keys if k in AGENT_REGISTRY)))
-
-    async def _dispatch_single(self, key: str, ctx: AgentContext) -> Optional[AgentResult]:
-        if key not in AGENT_REGISTRY: return None
-        try:
-            return await asyncio.wait_for(AGENT_REGISTRY[key]().run(ctx), float(self.global_config.get("agent_timeout_seconds", 30)))
-        except asyncio.TimeoutError:
-            return AgentResult(key, key, ctx.customer_id, False, {}, error="timeout")
 
     # ── Synthesis ──────────────────────────────────────────────────────────
 

@@ -1,0 +1,167 @@
+LANGGRAPH ORCHESTRATION MIGRATION
+=================================
+
+PURPOSE
+-------
+The Customer 360 pipeline now uses LangGraph to coordinate the existing six
+agents: Churn, Fraud, CLV, Sentiment, Credit Risk, and Next Best Action (NBA).
+The agents remain ordinary BaseAgent implementations. Their scoring logic was
+not rewritten, and they were not converted into LLM tool-calling agents.
+
+Customer Profiling and Customer Journey agents are outside this migration.
+
+IMPLEMENTATION CHANGES
+----------------------
+
+1. agents/orchestrator/graph.py
+
+   This new module defines and compiles the graph used by the orchestrator.
+   The graph has these stages:
+
+   - prepare: run the shared DataQualityGate once, resolve the as_of date,
+     construct run metadata, and call the existing orchestrator task planner.
+   - independent agent nodes: Churn, Fraud, CLV, and Sentiment are graph nodes
+     on one parallel branch. Each node checks whether its agent is selected and
+     returns without running if it is not.
+   - independent-result barrier: wait until the parallel branch has completed
+     before routing to dependent work.
+   - Credit Risk: run only when the plan selects it, after the parallel branch
+     has completed. It receives the Fraud output through ctx.prior when Fraud
+     succeeded; a failed or disabled prerequisite does not abort the pipeline.
+   - NBA: run only when selected, after Credit Risk has completed or been
+     skipped. It receives successful Churn, CLV, Fraud, and Credit Risk outputs
+     through graph state; failed agents are reported but are not exposed as
+     successful prior outputs.
+   - synthesise: call the existing synthesis method using successful results.
+
+   Agent nodes invoke BaseAgent.run(ctx), not execute(ctx). This preserves the
+   existing enabled-agent checks, confidence calculation, metadata, latency,
+   and agent-level exception handling. Nodes receive an AgentContext containing
+   the cleaned customer payload, run/customer identifiers, as_of value, and
+   optional in-flight transaction metadata. Dependent nodes receive successful
+   prior outputs through ctx.results_so_far.
+
+   A per-run asyncio.Semaphore enforces max_parallel_agents. Each invocation
+   uses the configured agent_timeout_seconds timeout. Timeouts and unexpected
+   exceptions are converted into per-agent failure results so one failed agent
+   does not discard successful sibling results or prevent synthesis.
+
+2. agents/orchestrator/state.py
+
+   This new module defines the typed PipelineState shared by graph nodes. The
+   results field uses an explicit reducer that merges keyed AgentResult maps.
+   Parallel nodes can therefore contribute separate agent results without
+   replacing one another's updates.
+
+3. agents/orchestrator/agent.py
+
+   OrchestratorAgent remains the public pipeline entry point. It constructs and
+   compiles the graph when the orchestrator instance is initialized; the API
+   gateway's existing module-level orchestrator instance therefore reuses the
+   compiled graph across requests instead of compiling it per request.
+
+   run_pipeline() now invokes the graph and uses its state to construct the
+   response. Existing planning (_plan and _llm_plan), synthesis
+   (_synthesise), cache-key construction, response fields, and result
+   persistence remain in the orchestrator. Agent results are ordered according
+   to the plan when assembling the response, preserving the prior result order.
+
+   SKIP_LLM is set for the graph run when narratives are disabled and is reset
+   in a finally block, including when graph execution, synthesis, or subsequent
+   response persistence raises. Cache lookup occurs before changing this
+   context variable, so cache-hit returns do not leave it set.
+
+TASK PLANNING AND DEPENDENCIES
+------------------------------
+The existing task modes and planning behavior remain supported:
+
+- full_360: all enabled agents.
+- churn_only: Churn.
+- fraud_only: Fraud.
+- nba_only: required independent agents, then Credit Risk and NBA as enabled.
+- risk_only: Fraud and Churn, then Credit Risk as enabled.
+- custom: the requested registered agents, with required dependencies inserted.
+- auto: Claude planning when configured, with the existing signal-based
+  heuristic fallback when Claude is unavailable or planning fails.
+
+Plans continue to be filtered using the registry and bank feature flags.
+Selecting NBA inserts enabled Churn, CLV, and Fraud dependencies and places
+Credit Risk before NBA. Selecting Credit Risk inserts enabled Fraud when it is
+not already selected. Disabled agents remain excluded.
+
+API, CACHE, AND DATA COMPATIBILITY
+----------------------------------
+The DataQualityGate is called once in graph preparation, before any selected
+agent runs. All agent nodes receive the cleaned payload and its quality
+metadata. The run state retains run_id, customer_id, resolved as_of, and
+optional in-flight transaction data.
+
+The result-cache key behavior and cache-hit response remain unchanged. The key
+continues to include customer_id, task, the customer-data fingerprint, the
+requested-agent list, narrative mode, and the explicit as_of argument. A
+real-time/in-flight run still bypasses result caching. Successful agent outputs
+continue to be saved through the existing memory store. LangGraph checkpoints
+were not introduced and do not replace the existing result cache.
+
+The response JSON contract remains unchanged, including run metadata, plan,
+latencies, confidence, successful and failed agent information, results,
+synthesis, data-quality report, cache_hit, and data fingerprint. Existing
+synthesis fields remain in place: health score and grade, component weights,
+risk alerts, executive narrative, recommended action, and per-agent summaries.
+
+No gateway routes or request models were changed. Direct single-agent routes,
+the real-time Fraud route, chat, authentication, rate limiting, and the React
+dashboard continue to use their existing paths and behavior. No React changes
+are required.
+
+DEPENDENCIES AND DOCUMENTATION
+------------------------------
+requirements.txt now pins langgraph==0.2.74 and pydantic==2.7.4 (previously
+2.7.0). The Pydantic update satisfies the tested LangGraph dependency
+resolution while retaining the project's FastAPI and Python 3.11 compatibility.
+
+README.md now notes the graph orchestration and clarifies that durable
+checkpoints are not enabled and that the result cache remains separate.
+
+TEST COVERAGE
+-------------
+tests/test_orchestrator_graph.py covers:
+
+- routing for every task mode and auto-plan fallback behavior;
+- parallel result reducer merging and quality-gate execution exactly once;
+- cleaned agent inputs, as_of and in-flight metadata;
+- disabled-agent filtering and prerequisite insertion;
+- Fraud-before-Credit-Risk and Credit-Risk-before-NBA result availability;
+- configured parallelism, per-agent timeouts, failure reporting, and retention
+  of successful results when another agent fails;
+- narratives-disabled behavior and SKIP_LLM reset after synthesis failure;
+- cache-hit behavior and successful-agent result persistence;
+- pipeline and synthesis response field compatibility; and
+- deterministic comparisons against the former phase dispatcher using
+  CUST-00001 and CUST-00007 fixtures.
+
+VERIFICATION PERFORMED
+----------------------
+- Focused graph tests: 19 passed.
+- Full test suite: 62 passed, 0 failed, 0 skipped, with 3 dependency/framework
+  deprecation warnings.
+- Fixture comparison: agent outputs, quality reports, plans, and synthesis
+  matched for CUST-00001 and CUST-00007. The comparison excluded run_id and
+  used narratives=False so the existing Claude narrative path could not add
+  nondeterministic text to the comparison.
+- Docker dependency/image build: docker compose build banking-agents completed
+  successfully (exit status 0). Services were not started by that build check.
+- Final editor diagnostics and git diff whitespace check: no issues reported.
+
+The Windows test run used PYTHONUTF8=1 because the repository contains
+Unicode text read using the platform's default encoding in existing code/tests.
+This environment setting was used for verification; it was not added as part
+of the migration.
+
+BEHAVIOR NOT CHANGED
+-------------------
+When live Claude narratives are enabled, their wording may vary across runs,
+as it did before this migration. Deterministic scoring and the structured
+response fields remain the compatibility target. No durable LangGraph
+checkpoint storage, customer-data retention policy, or checkpoint access
+control was added because checkpointing was not required.
